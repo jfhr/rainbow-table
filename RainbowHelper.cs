@@ -17,10 +17,13 @@ namespace Rainbow
             return DerivePassword(pms, hash, 0);
         }
 
+        /// <summary>
+        /// The reduction function. Returns different results depending on the value of <paramref name="iteration"/>.
+        /// </summary>
         public static string DerivePassword(RainbowParameters pms, byte[] hash, int iteration)
         {
             // get first 32 bits of sha512 of original hash
-            byte[] hash2 = sha512.ComputeHash(hash);
+            var hash2 = sha512.ComputeHash(hash);
             int seed = BitConverter.ToInt32(hash2, 0);
 
             // xor with iteration so we get different results for each row
@@ -40,38 +43,21 @@ namespace Rainbow
             return new string(password);
         }
 
-        public static byte[] HashPassword(RainbowParameters pms, string password)
+        /// <summary>
+        /// The hash function.
+        /// </summary>
+        public static HashableByteArray HashPassword(RainbowParameters pms, string password)
         {
             var passwordBytes = Convert.FromBase64String(password);
             var hash = sha512.ComputeHash(passwordBytes);
-            if (pms.HashLength == 512)
+            if (pms.HashLength == 64)
             {
-                return hash;
+                return (HashableByteArray)hash;
             }
 
             var cutHash = new byte[pms.HashLength];
             Array.Copy(hash, cutHash, pms.HashLength);
-            return cutHash;
-        }
-
-        public static bool AreEqual(byte[] a, byte[] b)
-        {
-            if (a is null || b is null && a != b)
-            {
-                return false;
-            }
-            if (a.Length != b.Length)
-            {
-                return false;
-            }
-            for (int i = 0; i < a.Length; i++)
-            {
-                if (a[i] != b[i])
-                {
-                    return false;
-                }
-            }
-            return true;
+            return (HashableByteArray)cutHash;
         }
     }
 }

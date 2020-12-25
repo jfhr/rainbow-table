@@ -11,12 +11,12 @@ namespace Rainbow
         /// <summary>
         /// Maps last column (hash) to first column (password).
         /// </summary>
-        private Dictionary<string, string> rows = new Dictionary<string, string>();
-        private object rowSync = new object();
+        private readonly Dictionary<HashableByteArray, string> rows = new Dictionary<HashableByteArray, string>();
+        private readonly object rowSync = new object();
+        private readonly RainbowParameters pms;
         private bool isWorking = false;
-        private RainbowParameters pms;
 
-        public event EventHandler<(string Hash, string Password)> FoundPassword;
+        public event EventHandler<(HashableByteArray Hash, string Password)> FoundPassword;
 
         public int RowCount => rows.Count;
 
@@ -57,24 +57,26 @@ namespace Rainbow
             return (est, best, worst);
         }
 
+        /// <summary>
+        /// Generate a random password and build a new row based on it, unless one already exists.
+        /// </summary>
         private void TryBuildNewRow()
         {
             string start;
             start = RainbowHelper.GenerateRandomPassword(pms);
 
             string password = start;
-            byte[] hash = null;
+            HashableByteArray hash = default;
 
             for (int i = 0; i < pms.RowLength; i++)
             {
-                hash = RainbowHelper.HashPassword(pms, password);
+                hash = (HashableByteArray) RainbowHelper.HashPassword(pms, password);
                 password = RainbowHelper.DerivePassword(pms, hash, i);
             }
 
             lock (rowSync)
             {
-                var hashString = Convert.ToBase64String(hash);
-                rows.TryAdd(hashString, start);
+                rows.TryAdd(hash, start);
             }
         }
 
@@ -86,9 +88,10 @@ namespace Rainbow
             }
         }
 
-        private void SearchRow(KeyValuePair<string, string> row, string hash, CancellationToken cancellationToken)
+        private void SearchRow(KeyValuePair<HashableByteArray, string> row, HashableByteArray search, CancellationToken cancellationToken)
         {
-            byte[] binHash = Convert.FromBase64String(hash);
+            var pHash = row.Key;
+            string password;
 
             // index where we start the search
             for (int startIndex = pms.RowLength - 1; startIndex >= 0; startIndex--)
@@ -96,11 +99,11 @@ namespace Rainbow
                 // index of the current column
                 for (int columnIndex = startIndex; columnIndex < pms.RowLength; columnIndex++)
                 {
-                    string password = RainbowHelper.DerivePassword(pms, binHash, columnIndex);
-                    byte[] pHash = RainbowHelper.HashPassword(pms, password);
-                    if (RainbowHelper.AreEqual(binHash, pHash))
+                    password = RainbowHelper.DerivePassword(pms, pHash, columnIndex);
+                    pHash = RainbowHelper.HashPassword(pms, password);
+                    if (search == pHash)
                     {
-                        FoundPassword?.Invoke(this, (hash, password));
+                        FoundPassword?.Invoke(this, (search, password));
                     }
 
                     if (cancellationToken.IsCancellationRequested)
@@ -111,7 +114,7 @@ namespace Rainbow
             }
         }
 
-        private void SearchPasswordInternal(string hash, int threadIndex, CancellationToken cancellationToken)
+        private void SearchPasswordInternal(HashableByteArray hash, int threadIndex, CancellationToken cancellationToken)
         {
             // we search only rows from here...
             int startIndex = RowCount / pms.ThreadCount * threadIndex;
@@ -175,7 +178,7 @@ namespace Rainbow
         /// <summary>
         /// Start searching a password in the background. This method returns almost immediately.
         /// </summary>
-        public void SearchPassword(string hash, CancellationToken cancellationToken)
+        public void SearchPassword(HashableByteArray hash, CancellationToken cancellationToken)
         {
             if (rows.ContainsKey(hash))
             {
