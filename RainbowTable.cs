@@ -1,137 +1,124 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 
 namespace Rainbow
 {
     /// <summary> Threadsafe. </summary>
-    class RainbowTable
+    internal class RainbowTable
     {
         /// <summary>
         /// Maps last column (hash) to first column (password).
         /// </summary>
-        private readonly Dictionary<HashableByteArray, string> rows = new Dictionary<HashableByteArray, string>();
+        private readonly List<(string Start, ByteString End)> rows = new List<(string Start, ByteString End)>();
         private readonly object rowSync = new object();
-        private readonly RainbowParameters pms;
+#if DEBUG
         private bool isWorking = false;
-
-        public event EventHandler<(HashableByteArray Hash, string Password)> FoundPassword;
+#endif
+        private RainbowParameters Pms => Program.Pms;
 
         public int RowCount => rows.Count;
 
-        public RainbowTable(RainbowParameters pms)
-        {
-            this.pms = pms;
-        }
-
         /// <summary>
-        /// Returns a tuple of the following values:
-        /// 
-        /// <list type="number">
-        /// <item>
-        /// Estimated percentage of covered hash values.
-        /// </item>
-        /// <item>
-        /// Percentage of covered hash values in the best case (i.e. no collisions).
-        /// </item>
-        /// <item>
-        /// Percentage of covered hash values in the worst case (only one unique hash per row).
-        /// </item>
-        /// </list>
+        /// Build a new row based on the <paramref name="startPassword"/>, unless one already exists.
         /// </summary>
-        public (double, double, double) GetStats()
+        private void TryBuildNewRow(string startPassword)
         {
-
-            // number of hashes
-            int n = RowCount * pms.RowLength;
-            // hash function domain size (no of possible hash values)
-            double d = Math.Pow(2, pms.HashLength);
-            // expected no of collisions (see https://en.wikipedia.org/wiki/Birthday_problem#Generalizations)
-            double expectedCollisions = n - d + d * Math.Pow((d - 1) / d, n);
-            int expectedUniqueHashes = n - (int)expectedCollisions;
-
-            double est = Math.Min(1, expectedUniqueHashes / d);
-            double best = Math.Min(1, n / d);
-            double worst = Math.Min(1, RowCount / d);
-            return (est, best, worst);
-        }
-
-        /// <summary>
-        /// Generate a random password and build a new row based on it, unless one already exists.
-        /// </summary>
-        private void TryBuildNewRow()
-        {
-            string start;
-            start = RainbowHelper.GenerateRandomPassword(pms);
-
-            string password = start;
-            HashableByteArray hash = default;
-
-            for (int i = 0; i < pms.RowLength; i++)
+            if (startPassword == "psqc")
             {
-                hash = (HashableByteArray) RainbowHelper.HashPassword(pms, password);
-                password = RainbowHelper.DerivePassword(pms, hash, i);
+                ;
+            }
+            string password = startPassword;
+            ByteString hash = RainbowHelper.HashPassword(password);
+
+            // we've already done one hash, so the for loop starts at 1
+            for (int i = 1; i < Pms.RowLength; i++)
+            {
+                password = RainbowHelper.DerivePassword(hash, i);
+                hash = RainbowHelper.HashPassword(password);
             }
 
             lock (rowSync)
             {
-                rows.TryAdd(hash, start);
+                rows.Add((startPassword, hash));
+                //rows.TryAdd(hash, startPassword);
             }
         }
 
         private void BuildRowsUntilCancelled(CancellationToken cancellationToken)
         {
+            // while we have covered less than 10% of all hashes, we create random passwords
             while (!cancellationToken.IsCancellationRequested)
             {
-                TryBuildNewRow();
+                TryBuildNewRow(RainbowHelper.GenerateRandomPassword());
             }
         }
 
-        private void SearchRow(KeyValuePair<HashableByteArray, string> row, HashableByteArray search, CancellationToken cancellationToken)
+        /// <summary>
+        /// Start building in the background. This method returns almost immediately.
+        /// </summary>
+        public void StartBuilding(CancellationToken cancellationToken)
         {
-            var pHash = row.Key;
-            string password;
-
-            // index where we start the search
-            for (int startIndex = pms.RowLength - 1; startIndex >= 0; startIndex--)
-            {
-                // index of the current column
-                for (int columnIndex = startIndex; columnIndex < pms.RowLength; columnIndex++)
-                {
-                    password = RainbowHelper.DerivePassword(pms, pHash, columnIndex);
-                    pHash = RainbowHelper.HashPassword(pms, password);
-                    if (search == pHash)
-                    {
-                        FoundPassword?.Invoke(this, (search, password));
-                    }
-
-                    if (cancellationToken.IsCancellationRequested)
-                    {
-                        return;
-                    }
-                }
-            }
+            RunInThreads((idx, ct) => BuildRowsUntilCancelled(ct), cancellationToken);
         }
 
-        private void SearchPasswordInternal(HashableByteArray hash, int threadIndex, CancellationToken cancellationToken)
+        /// <summary>
+        /// Get a password for a specific hash from the row starting with <paramref name="startPassword"/>,
+        /// or <see langword="null"/> if it isn't found.
+        /// </summary>
+        private string GetPasswordFromKnownRow(ByteString searchedHash, string startPassword)
         {
-            // we search only rows from here...
-            int startIndex = RowCount / pms.ThreadCount * threadIndex;
-            // ...to here (exclusive)
-            int endIndex = RowCount / pms.ThreadCount * (threadIndex + 1);
+            string password = startPassword;
+            ByteString hash = RainbowHelper.HashPassword(password);
 
-            var ourRows = rows.Skip(startIndex - 1).Take(endIndex - startIndex);
-
-            foreach (var row in ourRows)
+            if (hash == searchedHash)
             {
-                SearchRow(row, hash, cancellationToken);
+                return password;
+            }
 
-                if (cancellationToken.IsCancellationRequested)
+            // we've already done one hash, so the for loop starts at 1
+            for (int i = 1; i < Pms.RowLength; i++)
+            {
+                password = RainbowHelper.DerivePassword(hash, i);
+                hash = RainbowHelper.HashPassword(password);
+                if (hash == searchedHash)
                 {
-                    return;
+                    return password;
                 }
             }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Return a password that hashes to <paramref name="searchedHash"/>, or <see langword="null"/>
+        /// if cancelled or the search has been exhaustive.
+        /// </summary>
+        public string SearchPassword(ByteString searchedHash)
+        {
+            for (int startIdx = Pms.RowLength; startIdx >= 0; startIdx--)
+            {
+                ByteString hash = searchedHash;
+                for (int iteration = startIdx; iteration < Pms.RowLength; iteration++)
+                {
+                    string password = RainbowHelper.DerivePassword(hash, iteration);
+                    hash = RainbowHelper.HashPassword(password);
+                }
+                //if (rows.ContainsKey(hash))
+                foreach (var (start, end) in rows)
+                {
+                    if (end == hash)
+                    {
+                        var possiblePassword = GetPasswordFromKnownRow(searchedHash, start);
+                        if (possiblePassword != null)
+                        {
+                            return possiblePassword;
+                        }
+                    }
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -147,48 +134,28 @@ namespace Rainbow
         /// </remarks>
         private void RunInThreads(Action<int, CancellationToken> action, CancellationToken cancellationToken)
         {
+#if DEBUG
             if (isWorking)
             {
                 throw new InvalidOperationException("I'm already working.");
             }
 
-            var threads = new Thread[pms.ThreadCount];
             isWorking = true;
             cancellationToken.Register(() => isWorking = false);
+#endif
+            var threads = new Thread[Pms.ThreadCount];
 
-            for (int i = 0; i < threads.Length; i++)
+            // 1 main thread, the rest are workers for us to use
+            for (int i = 1; i < threads.Length; i++)
             {
                 var thread = new Thread(new ThreadStart(() => action(i, cancellationToken)))
                 {
+                    Name = $"RainbowWorker {i}",
                     IsBackground = true
                 };
                 thread.Start();
                 threads[i] = thread;
             }
-        }
-
-        /// <summary>
-        /// Start building in the background. This method returns almost immediately.
-        /// </summary>
-        public void StartBuilding(CancellationToken cancellationToken)
-        {
-            RunInThreads((idx, ct) => BuildRowsUntilCancelled(ct), cancellationToken);
-        }
-
-        /// <summary>
-        /// Start searching a password in the background. This method returns almost immediately.
-        /// </summary>
-        public void SearchPassword(HashableByteArray hash, CancellationToken cancellationToken)
-        {
-            if (rows.ContainsKey(hash))
-            {
-                // We're lucky! The hash value is already in a final row
-                FoundPassword?.Invoke(this, (hash, rows[hash]));
-            }
-            // We're still going to continue searching in case there are other matches
-            // The user can cancel at any time
-
-            RunInThreads((idx, ct) => SearchPasswordInternal(hash, idx, ct), cancellationToken);
         }
     }
 }
