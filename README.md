@@ -12,7 +12,7 @@ Experimental MD5 rainbow table implementation.
 - Clone the repository and cd into it
 - Run `dotnet build -c Release ./Rainbow.csproj`
 
-### Use prebuild binaries
+### Use prebuilt binaries
 
 - Install the .NET 5 runtime from [get.dot.net](https://get.dot.net)
 - Download the latest Rainbow.dll from the releases tab
