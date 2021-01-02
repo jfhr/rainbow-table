@@ -24,10 +24,6 @@ namespace Rainbow
         /// </summary>
         private void TryBuildNewRow(string startPassword)
         {
-            if (startPassword == "psqc")
-            {
-                ;
-            }
             string password = startPassword;
             ByteString hash = RainbowHelper.HashPassword(password);
 
